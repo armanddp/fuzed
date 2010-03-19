@@ -66,6 +66,10 @@ OptionParser.new do |opts|
   opts.on("-i", "--inet", "Load code over internet via master code server") do
     options[:inet] = true
   end
+  
+  opts.on("--debugger", "Setup debugger") do
+    options[:debugger] = true
+  end
 
   opts.on("-h", "--heartbeat", "Start with a heartbeat.") do
     $stderr.puts "WARNING! Heartbeats not supported with this build!"

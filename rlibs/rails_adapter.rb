@@ -1,5 +1,5 @@
 require 'cgi'
-
+ 
 # Adapter to run a Rails app with any supported Rack handler.
 # By default it will try to load the Rails application in the
 # current directory in the development environment.
@@ -9,54 +9,68 @@ require 'cgi'
 #  environment: Rails environment to run in (development [default], production or test)
 #  prefix: Set the relative URL root.
 #
-# Based on http://code.macournoyer.com/thin Rails adapater
-# which is
 # Based on http://fuzed.rubyforge.org/ Rails adapter
-# the circle is now complete!
 module Rack
   module Adapter 
     class Rails
       FILE_METHODS = %w(GET HEAD).freeze
       
       def initialize(options={})
-        @root   = options[:root]         || Dir.pwd
-        @env    = options[:environment]  || 'development'
-        @prefix = options[:prefix]
+        @root     = options[:root]         || Dir.pwd
+        @env      = options[:environment]  || 'development'
+        @prefix   = options[:prefix]
+        @debugger = options[:debugger]     || false
         
+        # setup_debugger if @debugger
         load_application
         
-        @file_server = Rack::File.new(::File.join(RAILS_ROOT, "public"))
+        @rails_app = if rack_based?
+          ActionController::Dispatcher.new
+        else
+          CgiApp.new
+        end
+        
+        @file_app = Rack::File.new(::File.join(RAILS_ROOT, "public"))
+      end
+      
+      def setup_debugger
+         require_library_or_gem 'ruby-debug'
+          ::Debugger.start
+          ::Debugger.settings[:autoeval] = true if ::Debugger.respond_to?(:settings)
+          puts "=> Debugger enabled"
+        rescue Exception
+          puts "You need to install ruby-debug to run the server in debugging mode. With gems, use 'gem install ruby-debug'"
+          exit
+      end
+      
+      def rack_based?
+        rails_version = ::Rails::VERSION
+        rack_based = rails_version::MAJOR >= 2 && 
+          (rails_version::MAJOR >= 3 ? true : rails_version::MINOR >= 2) && 
+          (rails_version::MAJOR == 2 ? rails_version::TINY >= 3 : true)
+        puts "Booting up Rails #{rails_version::MAJOR}.#{rails_version::MINOR}.#{rails_version::TINY}"
+        puts "Rack-based? #{rack_based}"
+        rack_based
       end
       
       def load_application
         ENV['RAILS_ENV'] = @env
-
+ 
         require "#{@root}/config/environment"
-        require 'dispatcher'
+#        require 'dispatcher'
         
-        ActionController::AbstractRequest.relative_url_root = @prefix if @prefix 
+        if @prefix
+          if ActionController::Base.respond_to?(:relative_url_root=)
+            ActionController::Base.relative_url_root = @prefix # Rails 2.1.1
+          else
+            ActionController::AbstractRequest.relative_url_root = @prefix
+          end
+        end
       end
       
-      # TODO refactor this in File#can_serve?(path) ??
       def file_exist?(path)
-        full_path = ::File.join(@file_server.root, Utils.unescape(path))
-        ::File.file?(full_path) && ::File.readable?(full_path)
-      end
-      
-      def serve_file(env)
-        @file_server.call(env)
-      end
-      
-      def serve_rails(env)
-        request         = Request.new(env)
-        response        = Response.new
-        
-        session_options = ActionController::CgiRequest::DEFAULT_SESSION_OPTIONS
-        cgi             = CGIWrapper.new(request, response)
-    
-        Dispatcher.dispatch(cgi, session_options, response)
-
-        response.finish
+        full_path = ::File.join(@file_app.root, Utils.unescape(path))
+        ::File.file?(full_path) && ::File.readable_real?(full_path)
       end
       
       def call(env)
@@ -66,18 +80,31 @@ module Rack
         
         if FILE_METHODS.include?(method)
           if file_exist?(path)              # Serve the file if it's there
-            return serve_file(env)
+            return @file_app.call(env)
           elsif file_exist?(cached_path)    # Serve the page cache if it's there
             env['PATH_INFO'] = cached_path
-            return serve_file(env)
+            return @file_app.call(env)
           end
         end
         
         # No static file, let Rails handle it
-        serve_rails(env)
+        @rails_app.call(env)
       end
     
       protected
+        # For Rails pre Rack (2.3)
+        class CgiApp
+          def call(env)
+            request         = Request.new(env)
+            response        = Response.new
+            session_options = ActionController::CgiRequest::DEFAULT_SESSION_OPTIONS
+            cgi             = CGIWrapper.new(request, response)
+ 
+            Dispatcher.dispatch(cgi, session_options, response)
+ 
+            response.finish
+          end
+        end
         
         class CGIWrapper < ::CGI
           def initialize(request, response, *args)
@@ -85,7 +112,7 @@ module Rack
             @response = response
             @args     = *args
             @input    = request.body
-
+ 
             super *args
           end
         
@@ -100,7 +127,7 @@ module Rack
                         
               @response['Content-Language'] = options.delete('language') if options['language']
               @response['Expires']          = options.delete('expires') if options['expires']
-
+ 
               @response.status              = options.delete('Status') if options['Status']
               
               # Convert 'cookie' header to 'Set-Cookie' headers.
@@ -115,10 +142,16 @@ module Rack
                   when Hash  then cookie.each { |_, c| cookies << c.to_s }
                   else            cookies << cookie.to_s
                 end
-        
+                
                 @output_cookies.each { |c| cookies << c.to_s } if @output_cookies
                 
-                @response['Set-Cookie'] = [@response['Set-Cookie'], cookies].compact.join("\n")
+                @response['Set-Cookie'] = [@response['Set-Cookie'], cookies].compact
+                # See http://groups.google.com/group/rack-devel/browse_thread/thread/e8759b91a82c5a10/a8dbd4574fe97d69?#a8dbd4574fe97d69
+                if Thin.ruby_18?
+                  @response['Set-Cookie'].flatten!
+                else
+                  @response['Set-Cookie'] = @response['Set-Cookie'].join("\n")
+                end
               end
               
               options.each { |k,v| @response[k] = v }
